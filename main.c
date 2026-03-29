@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <ctype.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -246,12 +247,44 @@ int execute_external_command(char *command)
     input_copy[sizeof(input_copy) - 1] = '\0';
     int argc = 0;
     char *args[64];
-    char *token = strtok(input_copy, " ");
+    char *p = input_copy;
 
-    while (token != NULL && argc < 63) 
+    while (*p != '\0' && argc < 63)
     {
-      args[argc++] = token;
-      token = strtok(NULL, " ");
+      while (*p != '\0' && isspace((unsigned char)*p))
+        p++;
+
+      if (*p == '\0')
+        break;
+
+      if (*p == '\'' || *p == '"')
+      {
+        char quote_char = *p;
+        p++;
+        args[argc++] = p;
+
+        while (*p != '\0' && *p != quote_char)
+          p++;
+
+        if (*p == quote_char)
+        {
+          *p = '\0';
+          p++;
+        }
+      }
+      else
+      {
+        args[argc++] = p;
+
+        while (*p != '\0' && !isspace((unsigned char)*p))
+          p++;
+
+        if (*p != '\0')
+        {
+          *p = '\0';
+          p++;
+        }
+      }
     }
 
     args[argc] = NULL;
@@ -280,7 +313,7 @@ void get_current_directory() {
 
 void change_directory(char* path) 
 {
-  char* resolved_path = NULL;
+  const char* resolved_path = NULL;
   int should_free = 0;
   
   // Handle NULL or empty string - treat as home directory
@@ -301,18 +334,19 @@ void change_directory(char* path)
     
     if (path[1] == '\0') {
       // Just "~"
-      resolved_path = (char *)home;
+      resolved_path = home;
     } else if (path[1] == '/') {
       // "~/" - concatenate home with the remainder
       size_t home_len = strlen(home);
       size_t remainder_len = strlen(path + 1);  // +1 to skip the '~'
-      resolved_path = malloc(home_len + remainder_len + 1);
-      if (resolved_path == NULL) {
+      char *expanded_path = malloc(home_len + remainder_len + 1);
+      if (expanded_path == NULL) {
         fprintf(stderr, "cd: malloc failed\n");
         return;
       }
-      strcpy(resolved_path, home);
-      strcat(resolved_path, path + 1);
+      strcpy(expanded_path, home);
+      strcat(expanded_path, path + 1);
+      resolved_path = expanded_path;
       should_free = 1;
     } else {
       // "~something" - not standard shell behavior, use as-is
@@ -328,9 +362,61 @@ void change_directory(char* path)
     fprintf(stderr, "cd: %s: %s\n", resolved_path, strerror(errno));
   }
   
-  if (should_free) {
-    free(resolved_path);
+  char *freeable_path = should_free ? (char *)resolved_path : NULL;
+  if (freeable_path != NULL) {
+    free(freeable_path);
   }
+}
+
+char* normalize_echo_args(char *input)
+{
+  char *src = input;
+  char *dst = input;
+
+  while (*src != '\0')
+  {
+    while (*src == ' ' || *src == '\t')
+      src++;
+
+    if (*src == '\0')
+      break;
+
+    if (dst != input)
+      *dst++ = ' ';
+
+    char quote_char = '\0';
+    while (*src != '\0')
+    {
+      if (quote_char != '\0')
+      {
+        if (*src == quote_char)
+        {
+          quote_char = '\0';
+          src++;
+          continue;
+        }
+        *dst++ = *src++;
+        continue;
+      }
+
+      if (*src == '\'' || *src == '"')
+      {
+        quote_char = *src++;
+        continue;
+      }
+
+      if (*src == ' ' || *src == '\t')
+        break;
+
+      *dst++ = *src++;
+    }
+
+    while (*src == ' ' || *src == '\t')
+      src++;
+  }
+
+  *dst = '\0';
+  return input;
 }
 
 void CommandLineHandler(char *input, size_t input_size){
@@ -426,7 +512,8 @@ void CommandLineHandler(char *input, size_t input_size){
     
     if (strncmp(input, "echo ", 5) == 0) 
     {
-      printf("%s\n", input + 5);
+      char *to_echo = normalize_echo_args(input + 5);
+      printf("%s\n", to_echo);
     }
     else if (strcmp(input, "echo") == 0) 
     {
