@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -267,6 +268,71 @@ int execute_external_command(char *command)
   }
 }
 
+void get_current_directory() {
+  char* cwd = getcwd(NULL, 0);
+  if (cwd) {
+    printf("%s\n", cwd);
+    free(cwd);
+  } else {
+    perror("getcwd failed");
+  }
+}
+
+void change_directory(char* path) 
+{
+  char* resolved_path = NULL;
+  int should_free = 0;
+  
+  // Handle NULL or empty string - treat as home directory
+  if (path == NULL || path[0] == '\0') {
+    resolved_path = getenv("HOME");
+    if (resolved_path == NULL) {
+      fprintf(stderr, "cd: HOME environment variable not set\n");
+      return;
+    }
+  }
+  // Handle tilde expansion
+  else if (path[0] == '~') {
+    const char* home = getenv("HOME");
+    if (home == NULL) {
+      fprintf(stderr, "cd: HOME environment variable not set\n");
+      return;
+    }
+    
+    if (path[1] == '\0') {
+      // Just "~"
+      resolved_path = (char *)home;
+    } else if (path[1] == '/') {
+      // "~/" - concatenate home with the remainder
+      size_t home_len = strlen(home);
+      size_t remainder_len = strlen(path + 1);  // +1 to skip the '~'
+      resolved_path = malloc(home_len + remainder_len + 1);
+      if (resolved_path == NULL) {
+        fprintf(stderr, "cd: malloc failed\n");
+        return;
+      }
+      strcpy(resolved_path, home);
+      strcat(resolved_path, path + 1);
+      should_free = 1;
+    } else {
+      // "~something" - not standard shell behavior, use as-is
+      resolved_path = path;
+    }
+  }
+  // Normal path
+  else {
+    resolved_path = path;
+  }
+  
+  if (chdir(resolved_path) != 0) {
+    fprintf(stderr, "cd: %s: %s\n", resolved_path, strerror(errno));
+  }
+  
+  if (should_free) {
+    free(resolved_path);
+  }
+}
+
 void CommandLineHandler(char *input, size_t input_size){
   struct termios orig, raw;
   int is_tty = (tcgetattr(STDIN_FILENO, &orig) == 0);
@@ -365,13 +431,28 @@ void CommandLineHandler(char *input, size_t input_size){
     else if (strcmp(input, "echo") == 0) 
     {
       printf("\n");
+    }
+    else if (strcmp(input, "pwd") == 0)
+    {
+      get_current_directory();
     } 
+    else if (strncmp(input, "cd ", 3) == 0) 
+    {
+      char *path = input + 3;
+      change_directory(path);
+    }
+    else if (strcmp(input, "cd") == 0) 
+    {
+      change_directory(NULL);  // Go to HOME
+    }
     else if (strncmp(input, "type ", 5) == 0) 
     {
       char *command = input + 5;
       if (strcmp(command, "echo") == 0 || 
           strcmp(command, "type") == 0 || 
-          strcmp(command, "exit") == 0) 
+          strcmp(command, "exit") == 0 ||
+          strcmp(command, "pwd") == 0 ||
+          strcmp(command, "cd") == 0)
       {
         printf("%s is a shell builtin\n", command);
       }
