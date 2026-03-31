@@ -10,7 +10,293 @@
 #include <termios.h>
 #include <dirent.h>
 
+#define INPUT_BUFFER_SIZE 1024
+#define MAX_ARGS 64
+#define MAX_PATH_BUFFER 1024
+#define MAX_MATCHES 10
 int command_exists(char *command, size_t buffer_size, int tab_count);
+
+#define MAX_JOBS 128
+
+typedef struct {
+  int active;
+  int job_id;
+  pid_t pid;
+  char command[INPUT_BUFFER_SIZE];
+  int is_done;
+} Job;
+
+int is_builtin_command(const char *command)
+{
+  return strcmp(command, "echo") == 0 ||
+         strcmp(command, "type") == 0 ||
+         strcmp(command, "exit") == 0 ||
+         strcmp(command, "pwd") == 0 ||
+         strcmp(command, "cd") == 0 ||
+         strcmp(command, "jobs") == 0;
+}
+
+void build_job_command(char *args[], int argc, char *out, size_t out_size)
+{
+  size_t used = 0;
+  out[0] = '\0';
+
+  for (int i = 0; i < argc; i++)
+  {
+    int written = snprintf(out + used, out_size - used, "%s%s", (i == 0) ? "" : " ", args[i]);
+    if (written < 0)
+      return;
+
+    if ((size_t)written >= out_size - used)
+    {
+      used = out_size - 1;
+      out[used] = '\0';
+      break;
+    }
+
+    used += (size_t)written;
+  }
+
+}
+
+void track_background_job(Job jobs[], int max_jobs, int job_id, pid_t pid, const char *command)
+{
+  for (int i = 0; i < max_jobs; i++)
+  {
+    if (!jobs[i].active)
+    {
+      jobs[i].active = 1;
+      jobs[i].job_id = job_id;
+      jobs[i].pid = pid;
+      jobs[i].is_done = 0;
+      strncpy(jobs[i].command, command, sizeof(jobs[i].command) - 1);
+      jobs[i].command[sizeof(jobs[i].command) - 1] = '\0';
+      return;
+    }
+  }
+}
+
+int allocate_job_id(Job jobs[], int max_jobs)
+{
+  int candidate = 1;
+
+  while (1)
+  {
+    int used = 0;
+    for (int i = 0; i < max_jobs; i++)
+    {
+      if (jobs[i].active && jobs[i].job_id == candidate)
+      {
+        used = 1;
+        break;
+      }
+    }
+
+    if (!used)
+      return candidate;
+
+    candidate++;
+  }
+}
+
+void get_current_and_previous_job_ids(Job jobs[], int max_jobs, int *current_job_id, int *previous_job_id)
+{
+  int newest_job_id = -1;
+  int previous_job_id_value = -1;
+
+  for (int i = 0; i < max_jobs; i++)
+  {
+    if (!jobs[i].active)
+      continue;
+
+    if (jobs[i].job_id > newest_job_id)
+    {
+      previous_job_id_value = newest_job_id;
+      newest_job_id = jobs[i].job_id;
+    }
+    else if (jobs[i].job_id > previous_job_id_value)
+    {
+      previous_job_id_value = jobs[i].job_id;
+    }
+  }
+
+  *current_job_id = newest_job_id;
+  *previous_job_id = previous_job_id_value;
+}
+
+void sort_active_job_indexes(Job jobs[], int max_jobs, int ordered_indexes[], int *count)
+{
+  int active_count = 0;
+
+  for (int i = 0; i < max_jobs; i++)
+  {
+    if (jobs[i].active)
+      ordered_indexes[active_count++] = i;
+  }
+
+  for (int i = 0; i < active_count; i++)
+  {
+    for (int j = i + 1; j < active_count; j++)
+    {
+      if (jobs[ordered_indexes[j]].job_id < jobs[ordered_indexes[i]].job_id)
+      {
+        int tmp = ordered_indexes[i];
+        ordered_indexes[i] = ordered_indexes[j];
+        ordered_indexes[j] = tmp;
+      }
+    }
+  }
+
+  *count = active_count;
+}
+
+char get_job_marker(int job_id, int current_job_id, int previous_job_id)
+{
+  if (job_id == current_job_id)
+    return '+';
+  if (job_id == previous_job_id)
+    return '-';
+  return ' ';
+}
+
+void print_jobs(Job jobs[], int max_jobs)
+{
+  int current_job_id;
+  int previous_job_id;
+  int ordered_indexes[MAX_JOBS];
+  int count;
+
+  get_current_and_previous_job_ids(jobs, max_jobs, &current_job_id, &previous_job_id);
+  sort_active_job_indexes(jobs, max_jobs, ordered_indexes, &count);
+
+  for (int i = 0; i < count; i++)
+  {
+    Job *job = &jobs[ordered_indexes[i]];
+    char marker = get_job_marker(job->job_id, current_job_id, previous_job_id);
+
+    if (job->is_done)
+      printf("[%d]%c  %-24s%s\n", job->job_id, marker, "Done", job->command);
+    else
+      printf("[%d]%c  %-24s%s &\n", job->job_id, marker, "Running", job->command);
+  }
+}
+
+void refresh_jobs_status(Job jobs[], int max_jobs)
+{
+  for (int i = 0; i < max_jobs; i++)
+  {
+    if (!jobs[i].active || jobs[i].is_done)
+      continue;
+
+    int status;
+    pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
+    if (result == jobs[i].pid)
+      jobs[i].is_done = 1;
+  }
+}
+
+void remove_done_jobs(Job jobs[], int max_jobs)
+{
+  for (int i = 0; i < max_jobs; i++)
+  {
+    if (jobs[i].active && jobs[i].is_done)
+      jobs[i].active = 0;
+  }
+}
+
+void notify_done_jobs(Job jobs[], int max_jobs)
+{
+  int current_job_id;
+  int previous_job_id;
+  int ordered_indexes[MAX_JOBS];
+  int count;
+
+  get_current_and_previous_job_ids(jobs, max_jobs, &current_job_id, &previous_job_id);
+  sort_active_job_indexes(jobs, max_jobs, ordered_indexes, &count);
+
+  for (int i = 0; i < count; i++)
+  {
+    Job *job = &jobs[ordered_indexes[i]];
+    if (!job->is_done)
+      continue;
+
+    char marker = get_job_marker(job->job_id, current_job_id, previous_job_id);
+    printf("[%d]%c  %-24s%s\n", job->job_id, marker, "Done", job->command);
+  }
+}
+
+int parse_command_args(char *input, char *args_buffer, char *args[], int max_args)
+{
+  int argc = 0;
+  char *src = input;
+  char *dst = args_buffer;
+
+  while (*src != '\0' && argc < max_args - 1)
+  {
+    while (*src != '\0' && isspace((unsigned char)*src))
+      src++;
+
+    if (*src == '\0')
+      break;
+
+    char quote_char = '\0';
+    args[argc++] = dst;
+
+    while (*src != '\0')
+    {
+      if (quote_char != '\0')
+      {
+        if (quote_char == '"' && *src == '\\' && *(src + 1) != '\0')
+        {
+          char next = *(src + 1);
+          if (next == '\\' || next == '"' || next == '$' || next == '`' || next == '\n')
+          {
+            src++;
+            *dst++ = *src++;
+          }
+          else
+          {
+            *dst++ = *src++;
+          }
+          continue;
+        }
+
+        if (*src == quote_char)
+        {
+          quote_char = '\0';
+          src++;
+          continue;
+        }
+
+        *dst++ = *src++;
+        continue;
+      }
+
+      if (*src == '\'' || *src == '"')
+      {
+        quote_char = *src++;
+        continue;
+      }
+
+      if (*src == '\\' && *(src + 1) != '\0')
+      {
+        src++;
+        *dst++ = *src++;
+        continue;
+      }
+
+      if (isspace((unsigned char)*src))
+        break;
+
+      *dst++ = *src++;
+    }
+
+    *dst++ = '\0';
+  }
+
+  args[argc] = NULL;
+  return argc;
+}
 
 
 int HandleTabCompletion(char* command, size_t buffer_size, int builtin_mode, int tab_count)
@@ -50,12 +336,10 @@ int HandleTabCompletion(char* command, size_t buffer_size, int builtin_mode, int
 
 int current_path_buffer(char* command)
 {
-  const char* name = command;
   struct stat buffer;
   char* pathenv = getenv("PATH");
   int exists;
-  char* fileOrDirectory = command;
-  char fullfilename[1024];
+  char fullfilename[MAX_PATH_BUFFER];
   
   if (!pathenv)
   {
@@ -95,6 +379,11 @@ int current_path_buffer(char* command)
 }
 
 int command_exists(char *command, size_t buffer_size, int tab_count) {
+  if (strchr(command, '/') != NULL)
+  {
+    return access(command, X_OK) == 0 ? 1 : 0;
+  }
+
   char *pathenv = getenv("PATH");
   if (!pathenv) 
   {
@@ -104,7 +393,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
   char *tab = strchr(command, '\t');
   if (tab != NULL)
   {
-    char phrase[1024];
+    char phrase[INPUT_BUFFER_SIZE];
     size_t phrase_len = (size_t)(tab - command);
     if (phrase_len >= sizeof(phrase))
       phrase_len = sizeof(phrase) - 1;
@@ -116,7 +405,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
     if (!paths)
       return 0;
 
-    char matches[10][256];
+    char matches[MAX_MATCHES][256];
     int num_matches = 0;
 
     char *token = strtok(paths, ":");
@@ -131,7 +420,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
           if (strstr(entry->d_name, phrase) == NULL)
             continue;
 
-          char fullfilename[1024];
+          char fullfilename[MAX_PATH_BUFFER];
           snprintf(fullfilename, sizeof(fullfilename), "%s/%s", token, entry->d_name);
           if (access(fullfilename, X_OK) != 0)
             continue;
@@ -171,7 +460,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
     else if (num_matches > 1)
     {
       // Compute longest common prefix
-      char lcp[1024];
+      char lcp[INPUT_BUFFER_SIZE];
       strcpy(lcp, matches[0]);
       for (int i = 1; i < num_matches; i++)
       {
@@ -216,7 +505,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
   char *token = strtok(fullPath, ":");
   while (token != NULL) 
   {
-    char fullfilename[1024];
+    char fullfilename[MAX_PATH_BUFFER];
     snprintf(fullfilename, sizeof(fullfilename), "%s/%s", token, command);
     if (access(fullfilename, X_OK) == 0) 
     {
@@ -230,7 +519,7 @@ int command_exists(char *command, size_t buffer_size, int tab_count) {
   return 0; // Command not found
 }
 
-int execute_external_command(char *command)
+int execute_external_command(char *args[], int run_in_background, pid_t *child_pid)
 {
   pid_t pid = fork();
 
@@ -242,59 +531,18 @@ int execute_external_command(char *command)
 
   else if (pid == 0) 
   {
-    char input_copy[1024];
-    strncpy(input_copy, command, sizeof(input_copy) - 1);
-    input_copy[sizeof(input_copy) - 1] = '\0';
-    int argc = 0;
-    char *args[64];
-    char *p = input_copy;
-
-    while (*p != '\0' && argc < 63)
-    {
-      while (*p != '\0' && isspace((unsigned char)*p))
-        p++;
-
-      if (*p == '\0')
-        break;
-
-      if (*p == '\'' || *p == '"')
-      {
-        char quote_char = *p;
-        p++;
-        args[argc++] = p;
-
-        while (*p != '\0' && *p != quote_char)
-          p++;
-
-        if (*p == quote_char)
-        {
-          *p = '\0';
-          p++;
-        }
-      }
-      else
-      {
-        args[argc++] = p;
-
-        while (*p != '\0' && !isspace((unsigned char)*p))
-          p++;
-
-        if (*p != '\0')
-        {
-          *p = '\0';
-          p++;
-        }
-      }
-    }
-
-    args[argc] = NULL;
     execvp(args[0], args);
     perror("execvp failed");
     exit(1);
   } 
   else 
   {
-    // Parent process
+    if (child_pid != NULL)
+      *child_pid = pid;
+
+    if (run_in_background)
+      return 0;
+
     int status;
     waitpid(pid, &status, 0);
     return status;
@@ -389,6 +637,21 @@ char* normalize_echo_args(char *input)
     {
       if (quote_char != '\0')
       {
+        if (quote_char == '"' && *src == '\\' && *(src + 1) != '\0')
+        {
+          char next = *(src + 1);
+          if (next == '\\' || next == '"' || next == '$' || next == '`' || next == '\n')
+          {
+            src++;
+            *dst++ = *src++;
+          }
+          else
+          {
+            *dst++ = *src++;
+          }
+          continue;
+        }
+
         if (*src == quote_char)
         {
           quote_char = '\0';
@@ -402,6 +665,13 @@ char* normalize_echo_args(char *input)
       if (*src == '\'' || *src == '"')
       {
         quote_char = *src++;
+        continue;
+      }
+
+      if (*src == '\\' && *(src + 1) != '\0')
+      {
+        src++;
+        *dst++ = *src++;
         continue;
       }
 
@@ -435,6 +705,12 @@ void CommandLineHandler(char *input, size_t input_size){
   while (1)
   {
     static int consecutive_tabs = 0;
+    static Job jobs[MAX_JOBS] = {0};
+
+    refresh_jobs_status(jobs, MAX_JOBS);
+    notify_done_jobs(jobs, MAX_JOBS);
+    remove_done_jobs(jobs, MAX_JOBS);
+
     printf("$ ");
     fflush(stdout);
 
@@ -461,7 +737,7 @@ void CommandLineHandler(char *input, size_t input_size){
         size_t typed_len = pos;
         
         // Extract the actual typed text (without tab)
-        char typed_text[1024];
+        char typed_text[INPUT_BUFFER_SIZE];
         strncpy(typed_text, input, typed_len);
         typed_text[typed_len] = '\0';
 
@@ -532,14 +808,16 @@ void CommandLineHandler(char *input, size_t input_size){
     {
       change_directory(NULL);  // Go to HOME
     }
+    else if (strcmp(input, "jobs") == 0)
+    {
+      refresh_jobs_status(jobs, MAX_JOBS);
+      print_jobs(jobs, MAX_JOBS);
+      remove_done_jobs(jobs, MAX_JOBS);
+    }
     else if (strncmp(input, "type ", 5) == 0) 
     {
       char *command = input + 5;
-      if (strcmp(command, "echo") == 0 || 
-          strcmp(command, "type") == 0 || 
-          strcmp(command, "exit") == 0 ||
-          strcmp(command, "pwd") == 0 ||
-          strcmp(command, "cd") == 0)
+      if (is_builtin_command(command))
       {
         printf("%s is a shell builtin\n", command);
       }
@@ -557,12 +835,32 @@ void CommandLineHandler(char *input, size_t input_size){
     } else if (strcmp(input, "exit") == 0) {
       break;
     } else {
-      char command_copy[1024];
-      strcpy(command_copy, input);
-      char *command = strtok(command_copy, " ");
+      char args_buffer[INPUT_BUFFER_SIZE];
+      char *args[MAX_ARGS];
+      int argc = parse_command_args(input, args_buffer, args, MAX_ARGS);
 
-      if (command && command_exists(command, sizeof(command_copy), 0) == 1) {
-        execute_external_command(input);
+      int run_in_background = 0;
+      if (argc > 0 && strcmp(args[argc - 1], "&") == 0)
+      {
+        run_in_background = 1;
+        argc--;
+        args[argc] = NULL;
+      }
+
+      if (argc == 0)
+        continue;
+
+      if (command_exists(args[0], sizeof(args_buffer), 0) == 1) {
+        pid_t child_pid = -1;
+        execute_external_command(args, run_in_background, &child_pid);
+        if (run_in_background)
+        {
+          int job_id = allocate_job_id(jobs, MAX_JOBS);
+          char job_command[INPUT_BUFFER_SIZE];
+          build_job_command(args, argc, job_command, sizeof(job_command));
+          track_background_job(jobs, MAX_JOBS, job_id, child_pid, job_command);
+          printf("[%d] %d\n", job_id, child_pid);
+        }
       } else {
         printf("%s: command not found\n", input);
       }
@@ -575,9 +873,12 @@ void CommandLineHandler(char *input, size_t input_size){
 
 int main(int argc, char *argv[]) 
 {
+  (void)argc;
+  (void)argv;
+
   // Flush after every printf
   setbuf(stdout, NULL);
-  char input[1024];
+  char input[INPUT_BUFFER_SIZE];
   CommandLineHandler(input, sizeof(input));
   exit(0);
 }
