@@ -2,20 +2,33 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+This project is actively maintained on the default branch.
+Security fixes are applied to the latest development state.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| main (latest) | :white_check_mark: |
+| older commits/releases | :x: |
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Please report vulnerabilities privately and responsibly.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+### How to report
+
+- Open a **private security advisory** in the repository, if available.
+- If private reporting is unavailable, open an issue and request a secure contact channel without disclosing exploit details publicly.
+
+### What to include
+
+- A clear description of the vulnerability
+- Impact and affected functionality
+- Reproduction steps or proof-of-concept details
+- Suggested mitigation (if known)
+
+### Response expectations
+
+- Initial acknowledgment target: within 5 business days
+- Triage and severity assessment after acknowledgment
+- If confirmed, a fix will be prepared and released as soon as practical
+- Credit can be provided in release notes unless you prefer to remain anonymous
