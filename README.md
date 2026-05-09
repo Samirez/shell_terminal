@@ -86,7 +86,6 @@ This shell is intended as a practical, extendable starting point for the CodeCra
 
 # Job Control
 - Background execution using &:
-    sh
     sleep 5 &
     jobs
 - Jobs are printed with job id, PID, and status (Running / Done).
